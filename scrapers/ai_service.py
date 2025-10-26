@@ -17,47 +17,115 @@ def initialize_chat(browser, caption):
     logger.info("Initializing chat with recipe context...")
 
     try:
-        # Shadow DOM Host (new: <duck-chat> in Oct 2025)
-        host = WebDriverWait(browser, 20).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "duck-chat"))
-        )
-        shadow_root = host.shadow_root  # Selenium 4+ native method
+        # Try primary Shadow DOM selector (new: <duck-chat>)
+        host = None
+        try:
+            host = WebDriverWait(browser, 20).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "duck-chat"))
+            )
+            shadow_root = host.shadow_root
+        except Exception:
+            # Fallback: sometimes Duck.ai uses a different host element
+            logger.info("Primary duck-chat host not found, trying fallback selectors")
+            shadow_root = None
 
-        # Inner text area
-        textarea = shadow_root.find_element(By.CSS_SELECTOR, "textarea[name='user-prompt']")
-        browser.execute_script("arguments[0].scrollIntoView({block:'center'});", textarea)
-        browser.execute_script("arguments[0].focus();", textarea)
-        textarea.click()
-        time.sleep(0.3)
+        # Helper to write debug HTML
+        def _write_debug_html(prefix="init_chat"):
+            try:
+                src = browser.page_source
+                fname = f"./scrapers/debug_{prefix}_{int(time.time())}.html"
+                with open(fname, "w", encoding="utf-8") as f:
+                    f.write(src)
+                logger.info(f"Wrote debug HTML to {fname}")
+            except Exception as ex:
+                logger.error(f"Failed to write debug HTML: {ex}")
 
-        context_prompt = (
-            f"I'm going to ask you questions about this recipe. "
-            f"Please use this recipe information as context for all your responses: {caption}"
-        )
+        # If we have a shadow_root, prefer it
+        textarea = None
+        if shadow_root is not None:
+            try:
+                textarea = shadow_root.find_element(By.CSS_SELECTOR, "textarea[name='user-prompt']")
+            except Exception:
+                logger.info("Textarea inside shadow root not found - will try light DOM selectors")
 
-        # Eingabetext per JS setzen (damit Input‑Event auch im ShadowContext feuert)
-        browser.execute_script(
-            """
-            arguments[0].value = arguments[1];
-            arguments[0].dispatchEvent(new InputEvent('input', {bubbles: true, composed: true}));
-            """,
-            textarea,
-            context_prompt,
-        )
-        logger.info("Prompt filled successfully inside Shadow DOM")
+        # Fallback: try to find input/textarea in light DOM
+        if textarea is None:
+            try:
+                textarea = WebDriverWait(browser, 10).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "textarea[name='user-prompt'], textarea, input[type='text']"))
+                )
+            except Exception as e:
+                logger.error(f"Unable to locate chat input: {e}", exc_info=True)
+                _write_debug_html("no_input")
+                return False
 
-        # Submit (Duck.ai benutzt <form> im ShadowRoot)
-        send_button = shadow_root.find_element(By.CSS_SELECTOR, "button[type='submit']")
-        browser.execute_script("arguments[0].click();", send_button)
+        # Focus and fill the textarea
+        try:
+            browser.execute_script("arguments[0].scrollIntoView({block:'center'});", textarea)
+            browser.execute_script("arguments[0].focus();", textarea)
+            textarea.click()
+            time.sleep(0.3)
 
-        WebDriverWait(browser, 30).until_not(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "button[type='submit'][disabled]"))
-        )
-        logger.info("Chat initialized successfully with recipe context")
-        return True
+            context_prompt = (
+                f"I'm going to ask you questions about this recipe. "
+                f"Please use this recipe information as context for all your responses: {caption}"
+            )
+
+            # Eingabetext per JS setzen (damit Input-Event auch im ShadowContext feuert)
+            browser.execute_script(
+                "arguments[0].value = arguments[1]; arguments[0].dispatchEvent(new InputEvent('input', {bubbles: true, composed: true}));",
+                textarea,
+                context_prompt,
+            )
+            logger.info("Prompt filled successfully (shadow or light DOM)")
+
+            # Try to click a submit button inside shadow root first, then fallback to light DOM
+            send_button = None
+            try:
+                if shadow_root is not None:
+                    send_button = shadow_root.find_element(By.CSS_SELECTOR, "button[type='submit']")
+            except Exception:
+                send_button = None
+
+            if send_button is None:
+                try:
+                    send_button = browser.find_element(By.CSS_SELECTOR, "button[type='submit'], button[data-role='send']")
+                except Exception:
+                    send_button = None
+
+            if send_button is None:
+                logger.error("No send/submit button found to initialize chat")
+                _write_debug_html("no_send_button")
+                return False
+
+            browser.execute_script("arguments[0].click();", send_button)
+
+            # Wait for the send button to become enabled/disabled cycle (submit complete)
+            try:
+                WebDriverWait(browser, 30).until_not(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "button[type='submit'][disabled]"))
+                )
+            except Exception:
+                # Not critical; proceed but write debug
+                logger.info("Timeout waiting for submit button state change (continuing)")
+
+            logger.info("Chat initialized successfully with recipe context")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed while filling or submitting chat prompt: {e}", exc_info=True)
+            _write_debug_html("fill_submit_error")
+            return False
 
     except Exception as e:
         logger.error(f"Failed to initialize chat: {e}", exc_info=True)
+        try:
+            # best-effort debug dump
+            with open('./scrapers/debug_init_chat.html', 'w', encoding='utf-8') as f:
+                f.write(browser.page_source)
+            logger.info("Wrote fallback debug HTML to ./scrapers/debug_init_chat.html")
+        except Exception:
+            logger.error("Failed to write fallback debug HTML")
         return False
 
 
