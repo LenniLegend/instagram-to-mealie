@@ -30,7 +30,7 @@ The problem with LLM's is that they are not deterministic, so the output can be 
 Make sure you have docker installed on your system.
 
 ```
-git clone https://github.com/doen1el/instagram-to-tandoor.git instagram-to-tandoor
+git clone https://github.com/LenniLegend/instagram-to-mealie.git
 cd instagram-to-tandoor
 ```
 
