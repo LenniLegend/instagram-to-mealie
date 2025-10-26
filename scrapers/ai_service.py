@@ -12,6 +12,47 @@ from selenium.webdriver.support.ui import WebDriverWait
 logger = setup_logging("duck_ai")
 
 
+def _save_debug_artifacts(browser, prefix):
+    """Save page_source, a screenshot and browser console logs for offline inspection.
+
+    Best-effort helper: any failure is ignored so this never raises during normal runs.
+    """
+    ts = int(time.time())
+    try:
+        src = browser.page_source
+        fname = f"./scrapers/{prefix}_page_{ts}.html"
+        with open(fname, "w", encoding="utf-8") as f:
+            f.write(src)
+        logger.info(f"Wrote debug page_source to {fname}")
+    except Exception as e:
+        logger.debug(f"Failed to write debug page_source: {e}")
+    try:
+        screenshot = f"./scrapers/{prefix}_screenshot_{ts}.png"
+        browser.save_screenshot(screenshot)
+        logger.info(f"Wrote debug screenshot to {screenshot}")
+    except Exception as e:
+        logger.debug(f"Failed to write screenshot: {e}")
+    try:
+        # browser.get_log may not be supported in all environments; try best-effort
+        logs = []
+        try:
+            logs = browser.get_log('browser')
+        except Exception:
+            # fallback: try driver.execute_script to read console if available
+            try:
+                logs = browser.execute_script('return window.__consoleLogs || []') or []
+            except Exception:
+                logs = []
+        if logs:
+            logfile = f"./scrapers/{prefix}_console_{ts}.json"
+            with open(logfile, 'w', encoding='utf-8') as f:
+                json.dump(logs, f, indent=2, ensure_ascii=False)
+            logger.info(f"Wrote browser console logs to {logfile}")
+    except Exception as e:
+        logger.debug(f"Failed to save console logs: {e}")
+
+
+
 def initialize_chat(browser, caption):
     """
     Initialize a chat with Duck.ai by providing the recipe caption as context.
@@ -34,6 +75,11 @@ def initialize_chat(browser, caption):
                 logger.info("Found textarea in shadow DOM")
         except Exception:
             logger.info("Primary duck-chat host not found, trying fallback selectors")
+            # save artifacts for debugging why host not found
+            try:
+                _save_debug_artifacts(browser, 'init_no_duckchat')
+            except Exception:
+                pass
             textarea = None
 
         # Fallback: Suche nach Textarea im normalen DOM
@@ -52,6 +98,11 @@ def initialize_chat(browser, caption):
             logger.info(f"Filtered to {len(visible_candidates)} visible candidate textareas")
             
             if not visible_candidates:
+                # debug artifacts
+                try:
+                    _save_debug_artifacts(browser, 'init_no_visible_input')
+                except Exception:
+                    pass
                 raise Exception("No visible textarea found for chat input")
             
             textarea = visible_candidates[0]
@@ -126,6 +177,10 @@ def send_raw_prompt(browser, prompt):
             )
         except Exception:
             logger.info("duck-chat host not found in send_raw_prompt, will try light DOM selectors")
+            try:
+                _save_debug_artifacts(browser, 'send_no_duckchat')
+            except Exception:
+                pass
 
         # Fallback: Light DOM - NUR Textareas (nicht input!)
         if not textarea:
@@ -167,6 +222,10 @@ def send_raw_prompt(browser, prompt):
                     textarea = candidates[0]
                     logger.info("Attempting forced input set on first textarea (may not be visible)")
                 else:
+                    try:
+                        _save_debug_artifacts(browser, 'send_no_visible_candidates')
+                    except Exception:
+                        pass
                     return None
             else:
                 textarea = visible[0]
@@ -251,7 +310,6 @@ def extract_json_from_response(response):
             # Letzter Versuch: Suche JSON-ähnliche Struktur im Text
             logger.info("Attempting in-browser DOM traversal to find JSON candidates (shadow/iframe aware)")
             # Hier könnte man noch weitere Parsing-Versuche machen
-            
             return None
             
     except Exception as e:
@@ -264,7 +322,13 @@ def send_json_prompt(browser, prompt):
     Send a prompt to Duck AI and extract JSON from the response.
     """
     response = send_raw_prompt(browser, prompt)
-    return extract_json_from_response(response)
+    data = extract_json_from_response(response)
+    if data is None:
+        try:
+            _save_debug_artifacts(browser, 'no_json')
+        except Exception:
+            pass
+    return data
 
 
 def get_number_of_steps(browser, caption=None):
