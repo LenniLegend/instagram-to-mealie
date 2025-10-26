@@ -213,11 +213,44 @@ def send_raw_prompt(browser, prompt):
 
         vis = [c for c in candidates if _is_visible(c) and (c.get_attribute('id') or '').lower() != 'state_hidden' and (c.get_attribute('name') or '').lower() != 'state_hidden']
         if not vis:
-            logger.error("No visible input candidate in send_raw_prompt")
-            _dump_debug("no_visible_input")
-            return None
+            logger.error("No visible input candidate in send_raw_prompt - dumping candidate diagnostics and attempting forced fallback")
+            # Dump candidate diagnostics for analysis
+            try:
+                diag = []
+                for i, c in enumerate(candidates):
+                    try:
+                        outer = c.get_attribute('outerHTML')
+                    except Exception:
+                        outer = '<outerHTML unavailable>'
+                    try:
+                        styles = browser.execute_script("var s = window.getComputedStyle(arguments[0]); return {display: s.display, visibility: s.visibility, width: s.width, height: s.height};", c)
+                    except Exception:
+                        styles = {}
+                    diag.append({'index': i, 'tag': c.tag_name, 'id': c.get_attribute('id'), 'name': c.get_attribute('name'), 'classes': c.get_attribute('class'), 'outerHTML': outer, 'styles': styles})
+                fname = f"./scrapers/debug_candidates_{int(time.time())}.json"
+                with open(fname, 'w', encoding='utf-8') as f:
+                    json.dump(diag, f, indent=2)
+                logger.info(f"Wrote input candidate diagnostics to {fname}")
+            except Exception as ex:
+                logger.error(f"Failed to write candidate diagnostics: {ex}")
 
-        input_el = vis[0]
+            # Attempt forced fallback on first candidate (best-effort)
+            try:
+                fallback_el = candidates[0]
+                logger.info("Attempting forced input set on first candidate (not visible)")
+                # If it's contenteditable, set innerText; else set value
+                is_contenteditable = browser.execute_script("return arguments[0].isContentEditable === true;", fallback_el)
+                if is_contenteditable:
+                    browser.execute_script("arguments[0].innerText = arguments[1]; arguments[0].dispatchEvent(new InputEvent('input', {bubbles:true, composed:true}));", fallback_el, prompt)
+                else:
+                    browser.execute_script("arguments[0].value = arguments[1]; arguments[0].dispatchEvent(new InputEvent('input', {bubbles:true, composed:true}));", fallback_el, prompt)
+                input_el = fallback_el
+            except Exception as e:
+                logger.error(f"Forced fallback failed: {e}", exc_info=True)
+                _dump_debug("forced_fallback_failed")
+                return None
+        else:
+            input_el = vis[0]
 
         # set value via JS
         try:
