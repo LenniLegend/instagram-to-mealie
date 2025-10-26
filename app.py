@@ -88,6 +88,13 @@ def history():
     jobs = Job.query.order_by(Job.created_at.desc()).all()
     return render_template('history.html', jobs=jobs)
 
+
+@app.route('/mealie')
+def mealie_info():
+    from os import getenv
+    base_url = getenv('BASE_URL_MEALIE')
+    return render_template('mealie_url.html', base_url=base_url)
+
 @app.route('/api/jobs')
 def api_jobs():
     jobs = Job.query.order_by(Job.created_at.desc()).all()

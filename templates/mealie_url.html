@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+
+{% block title %}Mealie Configuration{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-md-8">
+    <div class="card">
+      <div class="card-header bg-secondary text-white">
+        <h4 class="mb-0">Mealie Configuration</h4>
+      </div>
+      <div class="card-body">
+        {% if base_url %}
+        <p>The configured Mealie base URL from docker-compose / environment is:</p>
+        <pre class="bg-light p-3">{{ base_url }}</pre>
+        {% else %}
+        <div class="alert alert-warning">BASE_URL_MEALIE is not set.</div>
+        <p>Please set the environment variable in your <code>docker-compose.yml</code> or shell:</p>
+        <pre class="bg-light p-3">BASE_URL_MEALIE=https://mealie.example.com</pre>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
