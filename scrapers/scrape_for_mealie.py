@@ -146,9 +146,45 @@ def scrape_recipe_for_mealie(url, platform):
         # Add current date
         full_json["datePublished"] = datetime.now().strftime("%Y-%m-%d")
         
+        # --- Validate recipe before sending to Mealie ---
+        def _validate_recipe(r):
+            """Basic sanity checks for a recipe JSON object."""
+            missing = []
+            # We expect at least a name, ingredients and instructions
+            if not r.get('name'):
+                missing.append('name')
+            if not r.get('recipeIngredient'):
+                missing.append('recipeIngredient')
+            if not r.get('recipeInstructions'):
+                missing.append('recipeInstructions')
+            # Ensure @type is Recipe (if present)
+            if r.get('@type') and r.get('@type') != 'Recipe':
+                missing.append("@type (not 'Recipe')")
+            return missing
+
+        missing_fields = _validate_recipe(full_json)
+        if missing_fields:
+            logger.error(f"Recipe validation failed, missing or invalid fields: {missing_fields}")
+            # Save the full JSON for debugging
+            try:
+                with open('./scrapers/final_json_invalid.json', 'w') as outfile:
+                    json.dump(full_json, outfile, indent=2)
+                logger.info("Wrote invalid final JSON to ./scrapers/final_json_invalid.json")
+            except Exception as e:
+                logger.error(f"Failed to write invalid final JSON: {e}")
+
+            return {
+                "url": url,
+                "status": "error",
+                "result": {
+                    "status": "error",
+                    "error": f"Invalid recipe data: missing {missing_fields}"
+                }
+            }
+
         # Format as JSON-LD script
         json_ld_script = f'<script type="application/ld+json">{json.dumps(full_json)}</script>'
-        
+
         # Create final JSON structure for Mealie API
         final_json = {
             "includeTags": False,
