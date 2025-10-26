@@ -207,12 +207,46 @@ def extract_json_from_response(response):
         return None
     try:
         soup = BeautifulSoup(response, "html.parser")
+        # 1) JSON code blocks (preferred)
         block = soup.find_all("code", {"class": "language-json"})
-        if not block:
-            logger.warning("No JSON block found in AI response")
-            return None
-        data = json.loads(block[-1].get_text())
-        return data
+        if block:
+            try:
+                data = json.loads(block[-1].get_text())
+                return data
+            except Exception:
+                logger.info("Found language-json code block but failed to parse as JSON, falling back")
+
+        # 2) <pre> blocks that may contain JSON
+        pres = soup.find_all("pre")
+        for p in pres:
+            text = p.get_text(strip=True)
+            if text.startswith('{') or text.startswith('['):
+                try:
+                    return json.loads(text)
+                except Exception:
+                    continue
+
+        # 3) triple-backtick fenced blocks in raw HTML/text
+        full_text = soup.get_text("\n")
+        backtick_blocks = re.findall(r"```(?:json\n)?([\s\S]*?)```", full_text, flags=re.IGNORECASE)
+        for blk in backtick_blocks:
+            try:
+                return json.loads(blk.strip())
+            except Exception:
+                continue
+
+        # 4) Fallback: regex search for JSON-like substrings and try to parse them
+        candidates = re.findall(r"\{[\s\S]*?\}", full_text)
+        # try longer candidates first
+        candidates = sorted(candidates, key=lambda s: -len(s))
+        for cand in candidates:
+            try:
+                return json.loads(cand)
+            except Exception:
+                continue
+
+        logger.warning("No JSON block found in AI response after fallbacks")
+        return None
     except Exception as e:
         logger.error(f"Failed to extract JSON from AI response: {e}", exc_info=True)
         return None
@@ -260,34 +294,40 @@ def process_recipe_part(browser, part, mode="", step_number=None):
                 f"Write your Response in {lang}. "
                 f"Fill the following JSON section {part}. "
                 f"Only cover cooking step {step_number}. Limit to 3 ingredients. "
-                f"Return valid JSON enclosed in triple backticks ({backticks}json)."
+                f"Return valid JSON enclosed in triple backticks ({backticks}json). "
+                f"Respond ONLY with the JSON code block and no additional text."
             )
         elif mode == "info":
             prompt = (
                 f"Write your Response in {lang}. "
                 f"Fill author, description, recipeYield, prepTime, cookTime in {part}. "
-                f"Times must use ISO‑8601 duration format (PT30M, PT1H)."
+                f"Return a single JSON code block containing exactly these keys. "
+                f"Times must use ISO‑8601 duration format (PT30M, PT1H). "
+                f"Respond ONLY with the JSON code block and nothing else."
             )
         elif mode == "ingredients":
             prompt = (
                 f"Write your Response in {lang}. "
-                f"Append all clearly mentioned ingredients to 'recipeIngredient' in {part}."
+                f"Append all clearly mentioned ingredients to 'recipeIngredient' in {part}. "
+                f"Return exactly a JSON code block like {{\"recipeIngredient\": [ ... ]}} and nothing else."
             )
         elif mode == "name":
             prompt = (
                 f"Respond in {lang}. "
-                f"Provide a concise title for this recipe in {part}."
+                f"Provide a concise title for this recipe in {part}. "
+                f"Return exactly a JSON code block like {{\"name\": \"...\"}} and nothing else."
             )
         elif mode == "nutrition":
             prompt = (
                 f"Respond in {lang}. "
-                f"Fill calories and fatContent as strings in {part}."
+                f"Fill calories and fatContent as strings in {part}. "
+                f"Return exactly a JSON code block like {{\"nutrition\": {{...}}}} and nothing else."
             )
         else:
             prompt = (
                 f"Write your Response in {lang}. "
                 f"Complete JSON fragment {part}. "
-                f"Ensure response is a JSON code block in ({backticks}json)."
+                f"Ensure response is a single JSON code block in ({backticks}json) and nothing else."
             )
 
         data = send_json_prompt(browser, prompt)
