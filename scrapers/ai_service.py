@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import time
 from bs4 import BeautifulSoup
 from logs import setup_logging
 from selenium.webdriver.common.by import By
@@ -24,17 +25,47 @@ def initialize_chat(browser, caption):
     logger.info("Initializing chat with recipe context...")
     
     try:
-        # Wait for the textarea and enter the context prompt
-        textarea = WebDriverWait(browser, 10).until(
+        # Wait for the textarea
+        textarea = WebDriverWait(browser, 15).until(
             EC.presence_of_element_located((By.XPATH, "//textarea[@name='user-prompt']"))
         )
         
         # Set up context for all future interactions
         context_prompt = f"I'm going to ask you questions about this recipe. Please use this recipe information as context for all your responses: {caption}"
-        textarea.send_keys(context_prompt)
-        textarea.send_keys(Keys.RETURN)
+        
+        # Warte kurz, damit Element vollständig geladen ist
+        time.sleep(1)
+        
+        # Verwende JavaScript statt send_keys (umgeht Tastatur-Reachability Problem)
+        browser.execute_script(
+            "arguments[0].value = arguments[1]; arguments[0].dispatchEvent(new Event('input', { bubbles: true }));",
+            textarea,
+            context_prompt
+        )
+        logger.info(f"Successfully entered prompt via JavaScript ({len(context_prompt)} chars)")
+        
+        # Warte kurz vor Submit
+        time.sleep(0.5)
+        
+        # Trigger Enter per JavaScript
+        browser.execute_script(
+            "arguments[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));",
+            textarea
+        )
+        logger.info("Triggered Enter key via JavaScript")
+        
+        # Alternative: Suche Submit-Button und klicke ihn
+        try:
+            submit_button = WebDriverWait(browser, 5).until(
+                EC.presence_of_element_located((By.XPATH, "//button[@type='submit']"))
+            )
+            browser.execute_script("arguments[0].click();", submit_button)
+            logger.info("Submit button clicked via JavaScript")
+        except:
+            logger.info("No submit button found, relying on Enter key event")
         
         # Wait for the response to complete
+        time.sleep(3)
         WebDriverWait(browser, 60).until(EC.presence_of_element_located((By.XPATH, "//button[@type='submit' and @disabled]")))
         WebDriverWait(browser, 60).until_not(EC.presence_of_element_located((By.XPATH, "//button//rect[@width='10' and @height='10']")))
         
@@ -60,7 +91,7 @@ def send_raw_prompt(browser, prompt):
     logger.info(f"Sending raw prompt: {prompt[:50]}...")
     
     try:
-        # Wait for the textarea and enter the prompt
+        # Wait for the textarea
         textarea = WebDriverWait(browser, 15).until(
             EC.presence_of_element_located((By.XPATH, "//textarea[@name='user-prompt']"))
         )
@@ -70,13 +101,40 @@ def send_raw_prompt(browser, prompt):
             EC.element_to_be_clickable((By.XPATH, "//textarea[@name='user-prompt']"))
         )
         
-        # Clear any existing text
-        textarea.clear()
+        # Clear any existing text via JavaScript
+        browser.execute_script("arguments[0].value = '';", textarea)
         
-        # Enter the new prompt
-        textarea.send_keys(prompt)
-        textarea.send_keys(Keys.RETURN)
-
+        # Warte kurz
+        time.sleep(0.5)
+        
+        # Enter the new prompt via JavaScript
+        browser.execute_script(
+            "arguments[0].value = arguments[1]; arguments[0].dispatchEvent(new Event('input', { bubbles: true }));",
+            textarea,
+            prompt
+        )
+        logger.info(f"Prompt entered via JavaScript ({len(prompt)} chars)")
+        
+        time.sleep(0.5)
+        
+        # Trigger Enter per JavaScript
+        browser.execute_script(
+            "arguments[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));",
+            textarea
+        )
+        
+        # Alternative: Submit-Button klicken
+        try:
+            submit_button = WebDriverWait(browser, 3).until(
+                EC.presence_of_element_located((By.XPATH, "//button[@type='submit']"))
+            )
+            browser.execute_script("arguments[0].click();", submit_button)
+            logger.info("Submit button clicked")
+        except:
+            logger.info("No submit button found, relying on Enter key")
+        
+        # Wait for response to complete
+        time.sleep(2)
         
         # Then wait for it to become enabled again (when generation is complete)
         WebDriverWait(browser, 60).until(
@@ -206,7 +264,7 @@ def process_recipe_part(browser, part, mode="", step_number=None):
         # Create the appropriate prompt based on the mode
         if mode == "step" or step_number is not None:
             # Tandoor-style step prompt
-            prompt = f"Write your Response in the language {os.getenv('LANGUAGE_CODE', 'en')}. Please fill out this JSON document {part}. Only complete the specified sections. Only complete step {step_number} of the recipe. If the step has more than 3 ingredients, only complete the first 3 and finish the JSON object. The name of the step should be the step number e.g. 'name': '{step_number}.'. Only include the current instruction description in the instruction field. The amount value of the ingredient can only be a whole number or a decimal NOT A FRACTION (convert it to a decimal). If an ingredient has already been mentioned in a previous step, do not include it again as an ingredient in this step. Respond with a JSON code block enclosed in triple backticks (```json)."
+            prompt = f"Write your Response in the language {os.getenv('LANGUAGE_CODE', 'en')}. Please fill out this JSON document {part}. Only complete the specified sections. Only complete step {step_number} of the recipe. If the step has more than 3 ingredients, only complete the first 3 and finish the JSON object. The name of the step should be the step number e.g. 'name': '{step_number}.'. Only include the current instruction description in the instruction field. The amount value of the ingredient can only be a whole number or a decimal NOT A FRACTION (convert it to a decimal). If an ingredient has already been mentioned in a previous step, do not include it again as an ingredient in this step. Respond with a JSON code block enclosed in triple backticks (```
         elif mode == "info":
             prompt = f"Write your Response in the language {os.getenv('LANGUAGE_CODE', 'en')}. Please fill out this JSON document {part} Only fill out author, description, recipeYield, prepTime and cooktime. The cooktime and pretime should have the format e.g. PT1H for one hour or PT15M for 15 Minutes."
         elif mode == "ingredients":
