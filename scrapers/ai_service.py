@@ -163,32 +163,117 @@ def send_raw_prompt(browser, prompt):
     """
     logger.info(f"Sending raw prompt: {prompt[:80]}...")
     try:
-        host = WebDriverWait(browser, 20).until(EC.presence_of_element_located((By.CSS_SELECTOR, "duck-chat")))
-        shadow_root = host.shadow_root
+        # Helper to dump debug HTML
+        def _dump_debug(prefix="send_raw"):
+            try:
+                fname = f"./scrapers/debug_{prefix}_{int(time.time())}.html"
+                with open(fname, "w", encoding="utf-8") as f:
+                    f.write(browser.page_source)
+                logger.info(f"Wrote debug HTML to {fname}")
+            except Exception as ex:
+                logger.error(f"Failed to write debug HTML: {ex}")
 
-        textarea = shadow_root.find_element(By.CSS_SELECTOR, "textarea[name='user-prompt']")
-        browser.execute_script("arguments[0].scrollIntoView({block:'center'});", textarea)
-        browser.execute_script("arguments[0].focus();", textarea)
-        time.sleep(0.3)
+        # Try primary shadow host quickly
+        shadow_root = None
+        try:
+            host = WebDriverWait(browser, 6).until(EC.presence_of_element_located((By.CSS_SELECTOR, "duck-chat")))
+            shadow_root = host.shadow_root
+        except Exception:
+            logger.info("duck-chat host not found in send_raw_prompt, will try light DOM selectors")
 
-        browser.execute_script("arguments[0].value = '';", textarea)
-        time.sleep(0.2)
+        # gather candidate inputs
+        candidates = []
+        try:
+            if shadow_root is not None:
+                try:
+                    candidates = shadow_root.find_elements(By.CSS_SELECTOR, "textarea[name='user-prompt'], textarea, input[type='text']")
+                    logger.info(f"send_raw_prompt found {len(candidates)} candidates in shadow root")
+                except Exception:
+                    candidates = []
+        except Exception:
+            candidates = []
 
-        browser.execute_script(
-            """
-            arguments[0].value = arguments[1];
-            arguments[0].dispatchEvent(new InputEvent('input', {bubbles: true, composed: true}));
-            """,
-            textarea,
-            prompt,
-        )
+        if not candidates:
+            try:
+                candidates = browser.find_elements(By.CSS_SELECTOR, "textarea[name='user-prompt'], textarea[placeholder], textarea[aria-label], textarea, input[type='text'], div[contenteditable='true'], [role='textbox']")
+                logger.info(f"send_raw_prompt found {len(candidates)} candidates in light DOM")
+            except Exception as e:
+                logger.error(f"No input candidates found: {e}", exc_info=True)
+                _dump_debug("no_input")
+                return None
 
-        send_button = shadow_root.find_element(By.CSS_SELECTOR, "button[type='submit']")
-        browser.execute_script("arguments[0].click();", send_button)
+        def _is_visible(el):
+            try:
+                return browser.execute_script(
+                    "return (arguments[0] && arguments[0].offsetWidth>0 && arguments[0].offsetHeight>0 && window.getComputedStyle(arguments[0]).visibility !== 'hidden' && window.getComputedStyle(arguments[0]).display !== 'none');",
+                    el,
+                )
+            except Exception:
+                return False
 
-        WebDriverWait(browser, 60).until_not(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "button[type='submit'][disabled]"))
-        )
+        vis = [c for c in candidates if _is_visible(c) and (c.get_attribute('id') or '').lower() != 'state_hidden' and (c.get_attribute('name') or '').lower() != 'state_hidden']
+        if not vis:
+            logger.error("No visible input candidate in send_raw_prompt")
+            _dump_debug("no_visible_input")
+            return None
+
+        input_el = vis[0]
+
+        # set value via JS
+        try:
+            try:
+                browser.execute_script("arguments[0].scrollIntoView({block:'center'});", input_el)
+            except Exception:
+                pass
+            browser.execute_script("arguments[0].focus();", input_el)
+            time.sleep(0.05)
+            browser.execute_script("arguments[0].value = ''; arguments[0].dispatchEvent(new InputEvent('input', {bubbles:true, composed:true}));", input_el)
+            time.sleep(0.05)
+            browser.execute_script("arguments[0].value = arguments[1]; arguments[0].dispatchEvent(new InputEvent('input', {bubbles:true, composed:true}));", input_el, prompt)
+        except Exception as e:
+            logger.error(f"Failed to set prompt value: {e}", exc_info=True)
+            _dump_debug("set_value_failed")
+            return None
+
+        # find send button candidates
+        send_candidates = []
+        try:
+            if shadow_root is not None:
+                try:
+                    send_candidates = shadow_root.find_elements(By.CSS_SELECTOR, "button[type='submit'], button[data-role='send'], button[data-testid='send'], button[aria-label*='send'], button[title*='Send'], div[role='button'][aria-label*='send']")
+                except Exception:
+                    send_candidates = []
+        except Exception:
+            send_candidates = []
+
+        if not send_candidates:
+            try:
+                send_candidates = browser.find_elements(By.CSS_SELECTOR, "button[type='submit'], button[data-role='send'], button[data-testid='send'], button[aria-label*='send'], button[title*='Send'], div[role='button'][aria-label*='send']")
+            except Exception:
+                send_candidates = []
+
+        visible_sends = [s for s in send_candidates if _is_visible(s)]
+        if not visible_sends:
+            logger.error("No visible send button found in send_raw_prompt")
+            _dump_debug("no_send_button")
+            return None
+
+        send_btn = visible_sends[0]
+        try:
+            browser.execute_script("arguments[0].click();", send_btn)
+        except Exception:
+            try:
+                browser.execute_script("var ev = new MouseEvent('click', {bubbles:true, cancelable:true, view:window}); arguments[0].dispatchEvent(ev);", send_btn)
+            except Exception as e:
+                logger.error(f"Failed to click send button: {e}", exc_info=True)
+                _dump_debug("send_click_failed")
+                return None
+
+        # wait a short while for response to be updated
+        try:
+            WebDriverWait(browser, 60).until_not(EC.presence_of_element_located((By.CSS_SELECTOR, "button[type='submit'][disabled]")))
+        except Exception:
+            logger.info("No disabled submit button detected after send (continuing)")
 
         response = browser.page_source
         logger.info("Prompt sent and response retrieved successfully")
@@ -196,6 +281,11 @@ def send_raw_prompt(browser, prompt):
 
     except Exception as e:
         logger.error(f"Failed to send prompt: {e}", exc_info=True)
+        try:
+            with open('./scrapers/debug_send_raw_prompt_error.html', 'w', encoding='utf-8') as f:
+                f.write(browser.page_source)
+        except Exception:
+            pass
         return None
 
 
