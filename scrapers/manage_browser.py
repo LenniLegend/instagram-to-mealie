@@ -78,35 +78,34 @@ def open_browser(url=None, platform=None):
     
     # If Duck.ai, handle welcome screens
     elif not url or "duck.ai" in target_url:
+        logger.info("Navigating directly to Duck.ai chat page")
+        
         try:
-            logger.info("Navigating directly to Duck.ai chat page")
-
-try:
-    # Direkt zur Chat-Seite navigieren (überspringt Welcome-Screen)
-    browser.get('https://duck.ai/chat')
-    time.sleep(3)  # Warte auf vollständiges Laden
-    
-    # Prüfe ob Chat-Interface geladen ist
-    chat_input = WebDriverWait(browser, 15).until(
-        EC.presence_of_element_located((By.CSS_SELECTOR, "textarea, input[type='text']"))
-    )
-    logger.info("Chat interface loaded successfully")
-    
-except TimeoutException:
-    logger.warning("Chat interface not found - trying alternative selectors")
-    try:
-        # Alternative: Suche nach beliebigem Input-Feld
-        chat_input = WebDriverWait(browser, 10).until(
-            EC.presence_of_element_located((By.TAG_NAME, "textarea"))
-        )
-        logger.info("Chat interface loaded via alternative selector")
-    except TimeoutException:
-        logger.error("Failed to load Duck.ai chat interface")
-        raise Exception("Failed to open browser - Duck.ai chat interface not accessible")
-
-except Exception as e:
-    logger.error(f"Error accessing Duck.ai: {str(e)}")
-    raise Exception("Failed to open browser")
+            # Direkt zur Chat-Seite navigieren (überspringt Welcome-Screen)
+            browser.get('https://duck.ai/chat')
+            time.sleep(3)  # Warte auf vollständiges Laden
+            
+            # Prüfe ob Chat-Interface geladen ist
+            chat_input = WebDriverWait(browser, 15).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "textarea, input[type='text']"))
+            )
+            logger.info("Chat interface loaded successfully")
+            
+        except TimeoutException:
+            logger.warning("Chat interface not found - trying alternative selectors")
+            try:
+                # Alternative: Suche nach beliebigem Input-Feld
+                chat_input = WebDriverWait(browser, 10).until(
+                    EC.presence_of_element_located((By.TAG_NAME, "textarea"))
+                )
+                logger.info("Chat interface loaded via alternative selector")
+            except TimeoutException:
+                logger.error("Failed to load Duck.ai chat interface")
+                raise Exception("Failed to open browser - Duck.ai chat interface not accessible")
+        
+        except Exception as e:
+            logger.error(f"Error accessing Duck.ai: {str(e)}")
+            raise Exception("Failed to open browser")
     
     # General wait for content to load
     time.sleep(0.5)
