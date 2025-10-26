@@ -44,34 +44,62 @@ def initialize_chat(browser, caption):
         textarea = None
         if shadow_root is not None:
             try:
-                textarea = shadow_root.find_element(By.CSS_SELECTOR, "textarea[name='user-prompt']")
+                # prefer the explicitly named input
+                candidates = shadow_root.find_elements(By.CSS_SELECTOR, "textarea[name='user-prompt'], textarea, input[type='text']")
+                logger.info(f"Found {len(candidates)} candidate inputs in shadow root")
             except Exception:
-                logger.info("Textarea inside shadow root not found - will try light DOM selectors")
+                logger.info("No candidates inside shadow root - will try light DOM selectors")
+                candidates = []
+        else:
+            candidates = []
 
-        # Fallback: try to find input/textarea in light DOM
-        if textarea is None:
+        # Fallback: look in light DOM if no shadow candidates
+        if not candidates:
             try:
-                textarea = WebDriverWait(browser, 10).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, "textarea[name='user-prompt'], textarea, input[type='text']"))
-                )
+                candidates = browser.find_elements(By.CSS_SELECTOR, "textarea[name='user-prompt'], textarea, input[type='text']")
+                logger.info(f"Found {len(candidates)} candidate inputs in light DOM")
             except Exception as e:
-                logger.error(f"Unable to locate chat input: {e}", exc_info=True)
+                logger.error(f"Unable to locate any chat input candidates: {e}", exc_info=True)
                 _write_debug_html("no_input")
                 return False
 
-        # Focus and fill the textarea
-        try:
-            browser.execute_script("arguments[0].scrollIntoView({block:'center'});", textarea)
-            browser.execute_script("arguments[0].focus();", textarea)
-            textarea.click()
-            time.sleep(0.3)
+        # Helper to check visibility using computed styles
+        def _is_visible(el):
+            try:
+                return browser.execute_script(
+                    "return (arguments[0] && arguments[0].offsetWidth>0 && arguments[0].offsetHeight>0 && window.getComputedStyle(arguments[0]).visibility !== 'hidden' && window.getComputedStyle(arguments[0]).display !== 'none');",
+                    el,
+                )
+            except Exception:
+                return False
 
+        # Filter candidates for visible and not the known hidden state field
+        visible_candidates = [c for c in candidates if _is_visible(c) and (c.get_attribute('id') or '').lower() != 'state_hidden' and (c.get_attribute('name') or '').lower() != 'state_hidden']
+        logger.info(f"Filtered to {len(visible_candidates)} visible candidate inputs")
+
+        if not visible_candidates:
+            logger.error("No visible chat input found among candidates")
+            _write_debug_html("no_visible_input")
+            return False
+
+        textarea = visible_candidates[0]
+
+        # Focus and set value via JS rather than clicking (avoids ElementNotInteractable)
+        try:
             context_prompt = (
                 f"I'm going to ask you questions about this recipe. "
                 f"Please use this recipe information as context for all your responses: {caption}"
             )
 
-            # Eingabetext per JS setzen (damit Input-Event auch im ShadowContext feuert)
+            # Ensure element is scrolled into view if possible, but ignore errors
+            try:
+                browser.execute_script("arguments[0].scrollIntoView({block:'center'});", textarea)
+            except Exception:
+                logger.info("scrollIntoView failed or not needed for selected element")
+
+            # Use JS to focus and set the value
+            browser.execute_script("arguments[0].focus();", textarea)
+            time.sleep(0.1)
             browser.execute_script(
                 "arguments[0].value = arguments[1]; arguments[0].dispatchEvent(new InputEvent('input', {bubbles: true, composed: true}));",
                 textarea,
