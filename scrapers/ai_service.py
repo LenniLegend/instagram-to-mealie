@@ -369,6 +369,14 @@ def extract_json_from_response(response):
                 continue
 
         logger.warning("No JSON block found in AI response after fallbacks")
+        # Save full response HTML for debugging
+        try:
+            fname = f"./scrapers/debug_no_json_{int(time.time())}.html"
+            with open(fname, 'w', encoding='utf-8') as f:
+                f.write(response)
+            logger.info(f"Wrote debug AI response to {fname}")
+        except Exception as ex:
+            logger.error(f"Failed to write debug AI response: {ex}")
         return None
     except Exception as e:
         logger.error(f"Failed to extract JSON from AI response: {e}", exc_info=True)
