@@ -5,567 +5,365 @@ import time
 from bs4 import BeautifulSoup
 from logs import setup_logging
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 logger = setup_logging("duck_ai")
 
+
 def initialize_chat(browser, caption):
     """
-    Initialize chat with Duck.ai (Shadow DOM-compatible as of Oct 2025)
+    Initialize a chat with Duck.ai by providing the recipe caption as context.
+    Compatible with Duck.ai light DOM structure (Oct 2025).
     """
     logger.info("Initializing chat with recipe context...")
 
     try:
-        # Try primary Shadow DOM selector (new: <duck-chat>)
-        host = None
+        # Versuche primär duck-chat im Shadow DOM
         try:
-            host = WebDriverWait(browser, 20).until(
+            host = WebDriverWait(browser, 10).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "duck-chat"))
             )
-            shadow_root = host.shadow_root
+            shadow_root = browser.execute_script("return arguments[0].shadowRoot;", host)
+            textarea = browser.execute_script(
+                "return arguments[0].querySelector('textarea[name=\"user-prompt\"]');",
+                shadow_root
+            )
+            if textarea:
+                logger.info("Found textarea in shadow DOM")
         except Exception:
-            # Fallback: sometimes Duck.ai uses a different host element
             logger.info("Primary duck-chat host not found, trying fallback selectors")
-            shadow_root = None
+            textarea = None
 
-        # Helper to write debug HTML
-        def _write_debug_html(prefix="init_chat"):
-            try:
-                src = browser.page_source
-                fname = f"./scrapers/debug_{prefix}_{int(time.time())}.html"
-                with open(fname, "w", encoding="utf-8") as f:
-                    f.write(src)
-                logger.info(f"Wrote debug HTML to {fname}")
-            except Exception as ex:
-                logger.error(f"Failed to write debug HTML: {ex}")
-
-        # If we have a shadow_root, prefer it
-        textarea = None
-        if shadow_root is not None:
-            try:
-                # prefer the explicitly named input
-                candidates = shadow_root.find_elements(By.CSS_SELECTOR, "textarea[name='user-prompt'], textarea, input[type='text']")
-                logger.info(f"Found {len(candidates)} candidate inputs in shadow root")
-            except Exception:
-                logger.info("No candidates inside shadow root - will try light DOM selectors")
-                candidates = []
-        else:
-            candidates = []
-
-        # Fallback: look in light DOM if no shadow candidates
-        if not candidates:
-            try:
-                candidates = browser.find_elements(By.CSS_SELECTOR, "textarea[name='user-prompt'], textarea, input[type='text']")
-                logger.info(f"Found {len(candidates)} candidate inputs in light DOM")
-            except Exception as e:
-                logger.error(f"Unable to locate any chat input candidates: {e}", exc_info=True)
-                _write_debug_html("no_input")
-                return False
-
-        # Helper to check visibility using computed styles
-        def _is_visible(el):
-            try:
-                return browser.execute_script(
-                    "return (arguments[0] && arguments[0].offsetWidth>0 && arguments[0].offsetHeight>0 && window.getComputedStyle(arguments[0]).visibility !== 'hidden' && window.getComputedStyle(arguments[0]).display !== 'none');",
-                    el,
-                )
-            except Exception:
-                return False
-
-        # Filter candidates for visible and not the known hidden state field
-        visible_candidates = [c for c in candidates if _is_visible(c) and (c.get_attribute('id') or '').lower() != 'state_hidden' and (c.get_attribute('name') or '').lower() != 'state_hidden']
-        logger.info(f"Filtered to {len(visible_candidates)} visible candidate inputs")
-
-        if not visible_candidates:
-            logger.error("No visible chat input found among candidates")
-            _write_debug_html("no_visible_input")
-            return False
-
-        textarea = visible_candidates[0]
-
-        # Focus and set value via JS rather than clicking (avoids ElementNotInteractable)
-        try:
-            context_prompt = (
-                f"I'm going to ask you questions about this recipe. "
-                f"Please use this recipe information as context for all your responses: {caption}"
-            )
-
-            # Ensure element is scrolled into view if possible, but ignore errors
-            try:
-                browser.execute_script("arguments[0].scrollIntoView({block:'center'});", textarea)
-            except Exception:
-                logger.info("scrollIntoView failed or not needed for selected element")
-
-            # Use JS to focus and set the value
-            browser.execute_script("arguments[0].focus();", textarea)
-            time.sleep(0.1)
-            browser.execute_script(
-                "arguments[0].value = arguments[1]; arguments[0].dispatchEvent(new InputEvent('input', {bubbles: true, composed: true}));",
-                textarea,
-                context_prompt,
-            )
-            logger.info("Prompt filled successfully (shadow or light DOM)")
-
-            # Try to click a submit button inside shadow root first, then fallback to light DOM
-            send_button = None
-            try:
-                if shadow_root is not None:
-                    send_button = shadow_root.find_element(By.CSS_SELECTOR, "button[type='submit']")
-            except Exception:
-                send_button = None
-
-            if send_button is None:
+        # Fallback: Suche nach Textarea im normalen DOM
+        if not textarea:
+            candidates = browser.find_elements(By.CSS_SELECTOR, "textarea")
+            logger.info(f"Found {len(candidates)} candidate textareas in light DOM")
+            
+            visible_candidates = []
+            for idx, elem in enumerate(candidates):
                 try:
-                    send_button = browser.find_element(By.CSS_SELECTOR, "button[type='submit'], button[data-role='send']")
-                except Exception:
-                    send_button = None
+                    if elem.is_displayed():
+                        visible_candidates.append(elem)
+                except:
+                    pass
+            
+            logger.info(f"Filtered to {len(visible_candidates)} visible candidate textareas")
+            
+            if not visible_candidates:
+                raise Exception("No visible textarea found for chat input")
+            
+            textarea = visible_candidates[0]
 
-            if send_button is None:
-                logger.error("No send/submit button found to initialize chat")
-                _write_debug_html("no_send_button")
-                return False
+        # Text eingeben
+        browser.execute_script("arguments[0].scrollIntoView({block:'center'});", textarea)
+        browser.execute_script("arguments[0].focus();", textarea)
+        time.sleep(0.5)
 
-            browser.execute_script("arguments[0].click();", send_button)
+        context_prompt = (
+            f"I'm going to ask you questions about this recipe. "
+            f"Please use this recipe information as context for all your responses: {caption}"
+        )
 
-            # Wait for the send button to become enabled/disabled cycle (submit complete)
-            try:
-                WebDriverWait(browser, 30).until_not(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, "button[type='submit'][disabled]"))
-                )
-            except Exception:
-                # Not critical; proceed but write debug
-                logger.info("Timeout waiting for submit button state change (continuing)")
+        browser.execute_script(
+            "arguments[0].value = arguments[1]; "
+            "arguments[0].dispatchEvent(new Event('input', {bubbles:true, composed:true}));",
+            textarea,
+            context_prompt
+        )
+        
+        time.sleep(0.5)
+        
+        # Submit via Enter oder Button
+        try:
+            browser.execute_script(
+                "arguments[0].dispatchEvent(new KeyboardEvent('keydown', "
+                "{key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true, composed:true}));",
+                textarea
+            )
+        except:
+            pass
 
-            logger.info("Chat initialized successfully with recipe context")
-            return True
+        # Fallback: Submit-Button
+        try:
+            submit = browser.find_element(By.CSS_SELECTOR, "button[type='submit']")
+            browser.execute_script("arguments[0].click();", submit)
+        except:
+            pass
 
-        except Exception as e:
-            logger.error(f"Failed while filling or submitting chat prompt: {e}", exc_info=True)
-            _write_debug_html("fill_submit_error")
-            return False
+        logger.info("Prompt filled successfully (shadow or light DOM)")
+        
+        # Warte auf Antwort - längere Zeit
+        time.sleep(5)
+        
+        logger.info("Chat initialized successfully with recipe context")
+        return True
 
     except Exception as e:
         logger.error(f"Failed to initialize chat: {e}", exc_info=True)
-        try:
-            # best-effort debug dump
-            with open('./scrapers/debug_init_chat.html', 'w', encoding='utf-8') as f:
-                f.write(browser.page_source)
-            logger.info("Wrote fallback debug HTML to ./scrapers/debug_init_chat.html")
-        except Exception:
-            logger.error("Failed to write fallback debug HTML")
         return False
 
 
 def send_raw_prompt(browser, prompt):
     """
-    Send a text prompt to Duck.ai and return HTML response
+    Send a prompt to Duck.ai and get the raw HTML response.
     """
     logger.info(f"Sending raw prompt: {prompt[:80]}...")
+    
     try:
-        # Helper to dump debug HTML
-        def _dump_debug(prefix="send_raw"):
-            try:
-                fname = f"./scrapers/debug_{prefix}_{int(time.time())}.html"
-                with open(fname, "w", encoding="utf-8") as f:
-                    f.write(browser.page_source)
-                logger.info(f"Wrote debug HTML to {fname}")
-            except Exception as ex:
-                logger.error(f"Failed to write debug HTML: {ex}")
-
-        # Try primary shadow host quickly
-        shadow_root = None
+        # Warte kurz vor jedem neuen Prompt
+        time.sleep(2)
+        
+        # Versuche primär Shadow DOM
+        textarea = None
         try:
-            host = WebDriverWait(browser, 6).until(EC.presence_of_element_located((By.CSS_SELECTOR, "duck-chat")))
-            shadow_root = host.shadow_root
+            host = browser.find_element(By.CSS_SELECTOR, "duck-chat")
+            shadow_root = browser.execute_script("return arguments[0].shadowRoot;", host)
+            textarea = browser.execute_script(
+                "return arguments[0].querySelector('textarea[name=\"user-prompt\"]');",
+                shadow_root
+            )
         except Exception:
             logger.info("duck-chat host not found in send_raw_prompt, will try light DOM selectors")
 
-        # gather candidate inputs
-        candidates = []
-        try:
-            if shadow_root is not None:
+        # Fallback: Light DOM - NUR Textareas (nicht input!)
+        if not textarea:
+            candidates = browser.find_elements(By.CSS_SELECTOR, "textarea")
+            logger.info(f"send_raw_prompt found {len(candidates)} textareas in light DOM")
+            
+            # Debug: Speichere Kandidaten-Info
+            debug_data = []
+            for idx, elem in enumerate(candidates):
                 try:
-                    candidates = shadow_root.find_elements(By.CSS_SELECTOR, "textarea[name='user-prompt'], textarea, input[type='text']")
-                    logger.info(f"send_raw_prompt found {len(candidates)} candidates in shadow root")
-                except Exception:
-                    candidates = []
-        except Exception:
-            candidates = []
-
-        if not candidates:
-            try:
-                candidates = browser.find_elements(By.CSS_SELECTOR, "textarea[name='user-prompt'], textarea[placeholder], textarea[aria-label], textarea, input[type='text'], div[contenteditable='true'], [role='textbox']")
-                logger.info(f"send_raw_prompt found {len(candidates)} candidates in light DOM")
-            except Exception as e:
-                logger.error(f"No input candidates found: {e}", exc_info=True)
-                _dump_debug("no_input")
-                return None
-
-        def _is_visible(el):
-            try:
-                return browser.execute_script(
-                    "return (arguments[0] && arguments[0].offsetWidth>0 && arguments[0].offsetHeight>0 && window.getComputedStyle(arguments[0]).visibility !== 'hidden' && window.getComputedStyle(arguments[0]).display !== 'none');",
-                    el,
-                )
-            except Exception:
-                return False
-
-        vis = [c for c in candidates if _is_visible(c) and (c.get_attribute('id') or '').lower() != 'state_hidden' and (c.get_attribute('name') or '').lower() != 'state_hidden']
-        if not vis:
-            logger.error("No visible input candidate in send_raw_prompt - dumping candidate diagnostics and attempting forced fallback")
-            # Dump candidate diagnostics for analysis
-            try:
-                diag = []
-                for i, c in enumerate(candidates):
-                    try:
-                        outer = c.get_attribute('outerHTML')
-                    except Exception:
-                        outer = '<outerHTML unavailable>'
-                    try:
-                        styles = browser.execute_script("var s = window.getComputedStyle(arguments[0]); return {display: s.display, visibility: s.visibility, width: s.width, height: s.height};", c)
-                    except Exception:
-                        styles = {}
-                    diag.append({'index': i, 'tag': c.tag_name, 'id': c.get_attribute('id'), 'name': c.get_attribute('name'), 'classes': c.get_attribute('class'), 'outerHTML': outer, 'styles': styles})
-                fname = f"./scrapers/debug_candidates_{int(time.time())}.json"
-                with open(fname, 'w', encoding='utf-8') as f:
-                    json.dump(diag, f, indent=2)
-                logger.info(f"Wrote input candidate diagnostics to {fname}")
-            except Exception as ex:
-                logger.error(f"Failed to write candidate diagnostics: {ex}")
-
-            # Attempt forced fallback on first candidate (best-effort)
-            try:
-                fallback_el = candidates[0]
-                logger.info("Attempting forced input set on first candidate (not visible)")
-                # If it's contenteditable, set innerText; else set value
-                is_contenteditable = browser.execute_script("return arguments[0].isContentEditable === true;", fallback_el)
-                if is_contenteditable:
-                    browser.execute_script("arguments[0].innerText = arguments[1]; arguments[0].dispatchEvent(new InputEvent('input', {bubbles:true, composed:true}));", fallback_el, prompt)
+                    is_visible = elem.is_displayed()
+                    debug_data.append({
+                        "index": idx,
+                        "tag": elem.tag_name,
+                        "id": elem.get_attribute("id") or "",
+                        "name": elem.get_attribute("name") or "",
+                        "classes": elem.get_attribute("class") or "",
+                        "placeholder": elem.get_attribute("placeholder") or "",
+                        "visible": is_visible
+                    })
+                except:
+                    pass
+            
+            # Wähle sichtbare Textarea
+            visible = [c for c in candidates if c.is_displayed()]
+            
+            if not visible:
+                # Debug-Ausgabe
+                import time as t
+                debug_file = f"./scrapers/debug_candidates_{int(t.time())}.json"
+                with open(debug_file, "w") as f:
+                    json.dump(debug_data, f, indent=2)
+                logger.info(f"Wrote textarea candidate diagnostics to {debug_file}")
+                
+                logger.error("No visible textarea candidate in send_raw_prompt")
+                
+                # Letzter Fallback: Nimm erste Textarea auch wenn nicht visible
+                if candidates:
+                    textarea = candidates[0]
+                    logger.info("Attempting forced input set on first textarea (may not be visible)")
                 else:
-                    browser.execute_script("arguments[0].value = arguments[1]; arguments[0].dispatchEvent(new InputEvent('input', {bubbles:true, composed:true}));", fallback_el, prompt)
-                input_el = fallback_el
-            except Exception as e:
-                logger.error(f"Forced fallback failed: {e}", exc_info=True)
-                _dump_debug("forced_fallback_failed")
-                return None
-        else:
-            input_el = vis[0]
+                    return None
+            else:
+                textarea = visible[0]
 
-        # set value via JS
+        # Text eingeben
+        browser.execute_script("arguments[0].scrollIntoView({block:'center'});", textarea)
+        browser.execute_script("arguments[0].focus();", textarea)
+        time.sleep(0.3)
+        
+        browser.execute_script("arguments[0].value = '';", textarea)
+        time.sleep(0.3)
+
+        browser.execute_script(
+            "arguments[0].value = arguments[1]; "
+            "arguments[0].dispatchEvent(new Event('input', {bubbles:true, composed:true}));",
+            textarea,
+            prompt
+        )
+
+        time.sleep(0.5)
+        
+        # Submit
         try:
-            try:
-                browser.execute_script("arguments[0].scrollIntoView({block:'center'});", input_el)
-            except Exception:
-                pass
-            browser.execute_script("arguments[0].focus();", input_el)
-            time.sleep(0.05)
-            browser.execute_script("arguments[0].value = ''; arguments[0].dispatchEvent(new InputEvent('input', {bubbles:true, composed:true}));", input_el)
-            time.sleep(0.05)
-            browser.execute_script("arguments[0].value = arguments[1]; arguments[0].dispatchEvent(new InputEvent('input', {bubbles:true, composed:true}));", input_el, prompt)
-        except Exception as e:
-            logger.error(f"Failed to set prompt value: {e}", exc_info=True)
-            _dump_debug("set_value_failed")
-            return None
+            browser.execute_script(
+                "arguments[0].dispatchEvent(new KeyboardEvent('keydown', "
+                "{key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true, composed:true}));",
+                textarea
+            )
+        except:
+            pass
 
-        # find send button candidates
-        send_candidates = []
+        # Fallback: Button
         try:
-            if shadow_root is not None:
-                try:
-                    send_candidates = shadow_root.find_elements(By.CSS_SELECTOR, "button[type='submit'], button[data-role='send'], button[data-testid='send'], button[aria-label*='send'], button[title*='Send'], div[role='button'][aria-label*='send']")
-                except Exception:
-                    send_candidates = []
-        except Exception:
-            send_candidates = []
+            submit = browser.find_element(By.CSS_SELECTOR, "button[type='submit']")
+            browser.execute_script("arguments[0].click();", submit)
+        except:
+            pass
 
-        if not send_candidates:
-            try:
-                send_candidates = browser.find_elements(By.CSS_SELECTOR, "button[type='submit'], button[data-role='send'], button[data-testid='send'], button[aria-label*='send'], button[title*='Send'], div[role='button'][aria-label*='send']")
-            except Exception:
-                send_candidates = []
-
-        visible_sends = [s for s in send_candidates if _is_visible(s)]
-        if not visible_sends:
-            logger.error("No visible send button found in send_raw_prompt")
-            _dump_debug("no_send_button")
-            return None
-
-        send_btn = visible_sends[0]
+        # Warte auf Antwort
+        time.sleep(4)
+        
+        # Warte bis Submit-Button wieder aktiv ist (Antwort fertig)
         try:
-            browser.execute_script("arguments[0].click();", send_btn)
-        except Exception:
-            try:
-                browser.execute_script("var ev = new MouseEvent('click', {bubbles:true, cancelable:true, view:window}); arguments[0].dispatchEvent(ev);", send_btn)
-            except Exception as e:
-                logger.error(f"Failed to click send button: {e}", exc_info=True)
-                _dump_debug("send_click_failed")
-                return None
+            WebDriverWait(browser, 60).until(
+                lambda d: not d.find_element(By.CSS_SELECTOR, "button[type='submit']").get_attribute("disabled")
+            )
+        except:
+            pass
 
-        # wait a short while for response to be updated
-        try:
-            WebDriverWait(browser, 60).until_not(EC.presence_of_element_located((By.CSS_SELECTOR, "button[type='submit'][disabled]")))
-        except Exception:
-            logger.info("No disabled submit button detected after send (continuing)")
-
-        response = browser.page_source
         logger.info("Prompt sent and response retrieved successfully")
-        return response
+        return browser.page_source
 
     except Exception as e:
         logger.error(f"Failed to send prompt: {e}", exc_info=True)
-        try:
-            with open('./scrapers/debug_send_raw_prompt_error.html', 'w', encoding='utf-8') as f:
-                f.write(browser.page_source)
-        except Exception:
-            pass
         return None
 
 
 def extract_json_from_response(response):
     """
-    Extract structured JSON result from Duck.ai HTML output
+    Extract JSON from a Duck AI HTML response.
     """
     if not response:
         return None
+        
     try:
         soup = BeautifulSoup(response, "html.parser")
-        # 1) JSON code blocks (preferred)
-        block = soup.find_all("code", {"class": "language-json"})
-        if block:
-            try:
-                data = json.loads(block[-1].get_text())
-                return data
-            except Exception:
-                logger.info("Found language-json code block but failed to parse as JSON, falling back")
-
-        # 2) <pre> blocks that may contain JSON
-        pres = soup.find_all("pre")
-        for p in pres:
-            text = p.get_text(strip=True)
-            if text.startswith('{') or text.startswith('['):
-                try:
-                    return json.loads(text)
-                except Exception:
-                    continue
-
-        # 3) triple-backtick fenced blocks in raw HTML/text
-        full_text = soup.get_text("\n")
-        backtick_blocks = re.findall(r"```(?:json\n)?([\s\S]*?)```", full_text, flags=re.IGNORECASE)
-        for blk in backtick_blocks:
-            try:
-                return json.loads(blk.strip())
-            except Exception:
-                continue
-
-        # 4) Fallback: regex search for JSON-like substrings and try to parse them
-        candidates = re.findall(r"\{[\s\S]*?\}", full_text)
-        # try longer candidates first
-        candidates = sorted(candidates, key=lambda s: -len(s))
-        for cand in candidates:
-            try:
-                return json.loads(cand)
-            except Exception:
-                continue
-
-        logger.warning("No JSON block found in AI response after fallbacks")
-        # Save full response HTML for debugging
-        try:
-            fname = f"./scrapers/debug_no_json_{int(time.time())}.html"
-            with open(fname, 'w', encoding='utf-8') as f:
+        code_blocks = soup.find_all("code", {"class": "language-json"})
+        
+        if code_blocks:
+            json_response = code_blocks[-1].get_text()
+            return json.loads(json_response)
+        else:
+            logger.warning("No JSON block found in AI response after fallbacks")
+            
+            # Debug-Ausgabe
+            import time as t
+            debug_file = f"./scrapers/debug_no_json_{int(t.time())}.html"
+            with open(debug_file, "w") as f:
                 f.write(response)
-            logger.info(f"Wrote debug AI response to {fname}")
-        except Exception as ex:
-            logger.error(f"Failed to write debug AI response: {ex}")
-        return None
+            logger.info(f"Wrote debug AI response to {debug_file}")
+            
+            # Letzter Versuch: Suche JSON-ähnliche Struktur im Text
+            logger.info("Attempting in-browser DOM traversal to find JSON candidates (shadow/iframe aware)")
+            # Hier könnte man noch weitere Parsing-Versuche machen
+            
+            return None
+            
     except Exception as e:
-        logger.error(f"Failed to extract JSON from AI response: {e}", exc_info=True)
+        logger.error(f"Failed to extract JSON: {e}", exc_info=True)
         return None
 
 
 def send_json_prompt(browser, prompt):
-    """Wrapper: send prompt and parse JSON response"""
-    # First try the normal flow (page source based extraction)
-    html = send_raw_prompt(browser, prompt)
-    data = extract_json_from_response(html)
-    if data:
-        return data
-
-    # Fallback: try to locate JSON-like text inside live DOM including
-    # shadow roots and iframes (some sites render responses only in composed DOM)
-    try:
-        logger.info("Attempting in-browser DOM traversal to find JSON candidates (shadow/iframe aware)")
-
-        js = r"""
-        (function(){
-            const results = [];
-
-            function collectFromRoot(root){
-                if(!root) return;
-                try{
-                    // preferred selectors that often contain code blocks / responses
-                    const selectors = ['code.language-json','pre','code','div','p','span'];
-                    let nodes = [];
-                    try{ nodes = root.querySelectorAll(selectors.join(',')); }catch(e){}
-                    nodes.forEach(n=>{
-                        try{
-                            const txt = (n.innerText||n.textContent||'').trim();
-                            if(!txt) return;
-                            // Heuristic: only return nodes that look JSON-like or contain fenced code
-                            if(txt.indexOf('```')>-1 || txt.indexOf('{')>-1 || txt.indexOf('recipeIngredient')>-1 || txt.indexOf('interactionStatistic')>-1){
-                                results.push({outer: n.outerHTML, text: txt});
-                            }
-                        }catch(e){}
-                    });
-                }catch(e){}
-
-                // walk shadow roots
-                try{
-                    const all = root.querySelectorAll('*');
-                    all.forEach(el=>{
-                        try{ if(el.shadowRoot) collectFromRoot(el.shadowRoot); }catch(e){}
-                    });
-                }catch(e){}
-
-                // walk iframes
-                try{
-                    const iframes = root.querySelectorAll('iframe');
-                    iframes.forEach(iframe=>{
-                        try{
-                            const doc = iframe.contentDocument || (iframe.contentWindow && iframe.contentWindow.document);
-                            if(doc) collectFromRoot(doc);
-                        }catch(e){}
-                    });
-                }catch(e){}
-            }
-
-            try{ collectFromRoot(document); }catch(e){}
-            return results;
-        })();
-        """
-
-        candidates = browser.execute_script(js)
-        if candidates and isinstance(candidates, list):
-            # try parsing each candidate text using the existing extract logic
-            for cand in candidates:
-                try:
-                    txt = cand.get('text') if isinstance(cand, dict) else str(cand)
-                    if not txt:
-                        continue
-                    # Try same extraction flows as extract_json_from_response
-                    # 1) triple-backtick code blocks
-                    backtick_blocks = re.findall(r"```(?:json\n)?([\s\S]*?)```", txt, flags=re.IGNORECASE)
-                    for blk in backtick_blocks:
-                        try:
-                            return json.loads(blk.strip())
-                        except Exception:
-                            continue
-
-                    # 2) full-text JSON blob
-                    # try to find large JSON-like substrings
-                    cand_jsons = re.findall(r"\{[\s\S]*\}", txt)
-                    cand_jsons = sorted(cand_jsons, key=lambda s: -len(s))
-                    for cj in cand_jsons:
-                        try:
-                            return json.loads(cj)
-                        except Exception:
-                            continue
-
-                    # 3) attempt direct parse if the whole text looks like JSON
-                    stripped = txt.strip()
-                    if (stripped.startswith('{') or stripped.startswith('[')):
-                        try:
-                            return json.loads(stripped)
-                        except Exception:
-                            pass
-                except Exception:
-                    continue
-
-        logger.info("In-browser traversal did not yield a parseable JSON candidate")
-    except Exception as e:
-        logger.error(f"In-browser DOM traversal failed: {e}", exc_info=True)
-
-    return None
+    """
+    Send a prompt to Duck AI and extract JSON from the response.
+    """
+    response = send_raw_prompt(browser, prompt)
+    return extract_json_from_response(response)
 
 
 def get_number_of_steps(browser, caption=None):
     """
-    Ask Duck.ai to count recipe steps from current chat context
+    Extracts the number of steps from a recipe caption using Duck.ai.
     """
-    logger.info("Querying number of steps...")
+    logger.info("Getting number of recipe steps...")
+    
     try:
-        prompt = "How many cooking steps are in this recipe? Respond only with the number."
-        html = send_raw_prompt(browser, prompt)
-        if not html:
+        prompt = "How many steps are in this recipe? Please respond with only a number."
+        response = send_raw_prompt(browser, prompt)
+        
+        if not response:
+            logger.warning("No response received from Duck.ai")
             return None
 
-        soup = BeautifulSoup(html, "html.parser")
-        text_nodes = soup.find_all("p")
-        numbers = re.findall(r"\d+", " ".join([p.text for p in text_nodes]))
-        if numbers:
-            steps = int(numbers[0])
-            logger.info(f"Detected {steps} cooking steps.")
-            return steps
+        soup = BeautifulSoup(response, "html.parser")
+        last = soup.find_all("div", {"class": "VrBPSncUavA1d7C9kAc5"})
+        
+        if not last:
+            logger.warning("Couldn't find response divs")
+            return None
+            
+        paragraph = last[-1].find("p")
+        if not paragraph:
+            return None
+
+        text = paragraph.get_text().strip()
+        digits = re.findall(r"\d+", text)
+        
+        if digits:
+            count = int(digits[0])
+            logger.info(f"Detected {count} recipe steps")
+            return count
+            
         return None
+
     except Exception as e:
-        logger.error(f"Error determining number of steps: {e}", exc_info=True)
+        logger.error(f"Error extracting steps count: {e}", exc_info=True)
         return None
 
 
 def process_recipe_part(browser, part, mode="", step_number=None):
     """
-    Build and send prompt to Duck.ai to extract recipe sub-sections in JSON
+    Process a part of a recipe using Duck AI and get structured data.
     """
     try:
         backticks = chr(96) * 3
         lang = os.getenv("LANGUAGE_CODE", "en")
 
-        if mode == "step" and step_number is not None:
+        if mode == "step" or step_number is not None:
             prompt = (
-                f"Write your Response in {lang}. "
-                f"Fill the following JSON section {part}. "
-                f"Only cover cooking step {step_number}. Limit to 3 ingredients. "
-                f"Return valid JSON enclosed in triple backticks ({backticks}json). "
-                f"Respond ONLY with the JSON code block and no additional text."
+                f"Write your Response in the language {lang}. "
+                f"Please fill the JSON document {part}. "
+                f"Only step {step_number}. Return enclosed in ({backticks}json)."
             )
         elif mode == "info":
             prompt = (
                 f"Write your Response in {lang}. "
-                f"Fill author, description, recipeYield, prepTime, cookTime in {part}. "
-                f"Return a single JSON code block containing exactly these keys. "
-                f"Times must use ISO‑8601 duration format (PT30M, PT1H). "
-                f"Respond ONLY with the JSON code block and nothing else."
+                f"Fill author, description, recipeYield, prepTime, and cookTime in {part}. "
+                f"Use ISO 8601 duration format. Return enclosed in ({backticks}json)."
             )
         elif mode == "ingredients":
             prompt = (
                 f"Write your Response in {lang}. "
                 f"Append all clearly mentioned ingredients to 'recipeIngredient' in {part}. "
-                f"Return exactly a JSON code block like {{\"recipeIngredient\": [ ... ]}} and nothing else."
+                f"Return enclosed in ({backticks}json)."
             )
         elif mode == "name":
             prompt = (
                 f"Respond in {lang}. "
                 f"Provide a concise title for this recipe in {part}. "
-                f"Return exactly a JSON code block like {{\"name\": \"...\"}} and nothing else."
+                f"Return enclosed in ({backticks}json)."
             )
         elif mode == "nutrition":
             prompt = (
                 f"Respond in {lang}. "
                 f"Fill calories and fatContent as strings in {part}. "
-                f"Return exactly a JSON code block like {{\"nutrition\": {{...}}}} and nothing else."
+                f"Return enclosed in ({backticks}json)."
+            )
+        elif mode == "instructions":
+            prompt = (
+                f"Write your Response in {lang}. "
+                f"Complete JSON fragment {part}. "
+                f"Return enclosed in ({backticks}json)."
             )
         else:
             prompt = (
                 f"Write your Response in {lang}. "
-                f"Complete JSON fragment {part}. "
-                f"Ensure response is a single JSON code block in ({backticks}json) and nothing else."
+                f"Fill JSON {part}. Return enclosed in ({backticks}json)."
             )
 
         data = send_json_prompt(browser, prompt)
+        
         if data:
-            logger.info(f"Processed recipe part '{mode}' successfully.")
+            logger.info(f"Processed recipe part ({mode}) successfully.")
         else:
             logger.warning(f"No valid response for mode '{mode}'.")
+            
         return data
 
     except Exception as e:
