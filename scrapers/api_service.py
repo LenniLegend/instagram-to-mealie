@@ -39,6 +39,14 @@ def send_recipe(api_type, json_data, thumbnail_filename):
         api_logger.error(f"Unknown API type: {api_type}")
         return {"status": "error", "error": f"Unknown API type: {api_type}"}
     
+    # Validate base_url and token
+    if not base_url:
+        api_logger.error(f"Missing BASE_URL_{api_type} environment variable")
+        return {"status": "error", "error": f"Missing BASE_URL_{api_type}"}
+    if not token:
+        api_logger.error(f"Missing TOKEN_{api_type} environment variable")
+        return {"status": "error", "error": f"Missing TOKEN_{api_type}"}
+
     # Common headers for both APIs
     headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}
     
