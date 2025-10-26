@@ -11,6 +11,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 logger = setup_logging("duck_ai")
 
+
 def initialize_chat(browser, caption):
     """
     Initialize a chat with Duck.ai by providing the recipe caption as context.
@@ -23,46 +24,62 @@ def initialize_chat(browser, caption):
         bool: True if initialization is successful, False otherwise.
     """
     logger.info("Initializing chat with recipe context...")
-    
+
     try:
-        textarea = WebDriverWait(browser, 15).until(
+        textarea = WebDriverWait(browser, 20).until(
             EC.presence_of_element_located((By.XPATH, "//textarea[@name='user-prompt']"))
         )
+
+        # Sicherstellen, dass das Textfeld sichtbar und fokusiert ist
+        browser.execute_script("arguments[0].scrollIntoView(true);", textarea)
+        browser.execute_script("arguments[0].focus();", textarea)
+        time.sleep(0.3)
+        textarea.click()
 
         context_prompt = (
             f"I'm going to ask you questions about this recipe. "
             f"Please use this recipe information as context for all your responses: {caption}"
         )
 
-        time.sleep(1)
-        browser.execute_script(
-            "arguments[0].value = arguments[1]; arguments[0].dispatchEvent(new Event('input', { bubbles: true }));",
-            textarea, context_prompt
-        )
-        logger.info(f"Prompt entered via JavaScript ({len(context_prompt)} chars)")
+        # Versuch 1: send_keys (falls Selenium Zugriff hat)
+        try:
+            textarea.clear()
+            textarea.send_keys(context_prompt)
+            textarea.send_keys(Keys.RETURN)
+            logger.info("Prompt entered with send_keys()")
+        except Exception:
+            # Fallback: mit JavaScript schreiben
+            browser.execute_script(
+                "arguments[0].value = arguments[1]; "
+                "arguments[0].dispatchEvent(new Event('input', { bubbles: true }));",
+                textarea,
+                context_prompt,
+            )
+            logger.info("Prompt entered via JavaScript")
+            browser.execute_script(
+                "arguments[0].dispatchEvent(new KeyboardEvent('keydown', "
+                "{ key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true }));",
+                textarea,
+            )
 
-        time.sleep(0.5)
-        browser.execute_script(
-            "arguments[0].dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true}));",
-            textarea
-        )
+        # Warte kurz, bis Duck.ai reagiert
+        time.sleep(2)
 
         try:
-            submit_button = WebDriverWait(browser, 5).until(
+            # Fallback: Submit-Button klicken falls vorhanden
+            submit = WebDriverWait(browser, 5).until(
                 EC.presence_of_element_located((By.XPATH, "//button[@type='submit']"))
             )
-            browser.execute_script("arguments[0].click();", submit_button)
+            browser.execute_script("arguments[0].click();", submit)
             logger.info("Submit button clicked via JavaScript")
-        except:
-            logger.info("No submit button found, relying on Enter key event")
+        except Exception:
+            pass
 
-        time.sleep(3)
-        WebDriverWait(browser, 60).until(
+        # Warten bis der Chat reagiert
+        WebDriverWait(browser, 30).until_not(
             EC.presence_of_element_located((By.XPATH, "//button[@type='submit' and @disabled]"))
         )
-        WebDriverWait(browser, 60).until_not(
-            EC.presence_of_element_located((By.XPATH, "//button//rect[@width='10' and @height='10']"))
-        )
+
         logger.info("Chat initialized successfully with recipe context")
         return True
 
@@ -77,35 +94,43 @@ def send_raw_prompt(browser, prompt):
         textarea = WebDriverWait(browser, 15).until(
             EC.presence_of_element_located((By.XPATH, "//textarea[@name='user-prompt']"))
         )
-        WebDriverWait(browser, 15).until(
-            EC.element_to_be_clickable((By.XPATH, "//textarea[@name='user-prompt']"))
-        )
+        browser.execute_script("arguments[0].scrollIntoView(true);", textarea)
+        browser.execute_script("arguments[0].focus();", textarea)
+        time.sleep(0.3)
 
         browser.execute_script("arguments[0].value = '';", textarea)
         time.sleep(0.3)
 
+        # Schreiben per JavaScript
         browser.execute_script(
-            "arguments[0].value = arguments[1]; arguments[0].dispatchEvent(new Event('input', { bubbles: true }));",
-            textarea, prompt
+            "arguments[0].value = arguments[1]; "
+            "arguments[0].dispatchEvent(new Event('input', { bubbles: true }));",
+            textarea,
+            prompt,
+        )
+        logger.info(f"Prompt entered via JavaScript ({len(prompt)} chars)")
+
+        # Enter triggern
+        browser.execute_script(
+            "arguments[0].dispatchEvent(new KeyboardEvent('keydown', "
+            "{ key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true }));",
+            textarea,
         )
 
-        browser.execute_script(
-            "arguments[0].dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true}));",
-            textarea
-        )
-
+        # Fallback: Send button
         try:
-            submit_button = WebDriverWait(browser, 3).until(
+            submit = WebDriverWait(browser, 3).until(
                 EC.presence_of_element_located((By.XPATH, "//button[@type='submit']"))
             )
-            browser.execute_script("arguments[0].click();", submit_button)
+            browser.execute_script("arguments[0].click();", submit)
         except:
-            logger.info("Submit button not found, Enter key event used")
+            logger.debug("No submit button found")
 
+        # Warten bis Textarea wieder aktiv ist
         WebDriverWait(browser, 60).until(
             EC.element_to_be_clickable((By.XPATH, "//textarea[@name='user-prompt']"))
         )
-        logger.info("Response received successfully")
+
         return browser.page_source
 
     except Exception as e:
@@ -122,8 +147,7 @@ def extract_json_from_response(response):
         if not code_blocks:
             logger.warning("No JSON block found in response")
             return None
-        json_data = code_blocks[-1].get_text()
-        return json.loads(json_data)
+        return json.loads(code_blocks[-1].get_text())
     except Exception as e:
         logger.error(f"Failed to parse JSON: {e}", exc_info=True)
         return None
@@ -143,24 +167,17 @@ def get_number_of_steps(browser, caption=None):
             return None
 
         soup = BeautifulSoup(response, "html.parser")
-        last_response = soup.find_all("div", {"class": "VrBPSncUavA1d7C9kAc5"})
-        if not last_response:
-            logger.warning("Could not find response container")
+        last = soup.find_all("div", {"class": "VrBPSncUavA1d7C9kAc5"})
+        if not last:
+            logger.warning("Couldn't find response divs")
             return None
-
-        paragraph = last_response[-1].find("p")
+        paragraph = last[-1].find("p")
         if not paragraph:
-            logger.warning("No paragraph found in response")
             return None
 
         text = paragraph.get_text().strip()
         digits = re.findall(r"\d+", text)
-        if digits:
-            count = int(digits[0])
-            logger.info(f"Detected {count} recipe steps")
-            return count
-        logger.warning(f"No numeric value found in text: {text}")
-        return None
+        return int(digits[0]) if digits else None
 
     except Exception as e:
         logger.error(f"Error extracting steps count: {e}", exc_info=True)
@@ -170,55 +187,23 @@ def get_number_of_steps(browser, caption=None):
 def process_recipe_part(browser, part, mode="", step_number=None):
     try:
         backticks = chr(96) * 3
-        lang_code = os.getenv("LANGUAGE_CODE", "en")
+        lang = os.getenv("LANGUAGE_CODE", "en")
 
         if mode == "step" or step_number is not None:
             prompt = (
-                f"Write your Response in the language {lang_code}. "
-                f"Please fill out this JSON document {part}. "
-                f"Only complete step {step_number} of the recipe. "
-                f"If there are more than 3 ingredients, include only the first 3. "
-                f"Respond with a valid JSON enclosed in triple backticks ({backticks}json)."
-            )
-        elif mode == "info":
-            prompt = (
-                f"Write your Response in {lang_code}. "
-                f"Fill out author, description, recipeYield, prepTime, and cookTime in {part}. "
-                f"Use ISO 8601 duration format, e.g., PT1H or PT20M."
-            )
-        elif mode == "ingredients":
-            prompt = (
-                f"Write your Response in {lang_code}. "
-                f"Append ingredients to the 'recipeIngredient' list in {part}. One ingredient per line."
-            )
-        elif mode == "name":
-            prompt = (
-                f"Write your Response in {lang_code}. "
-                f"Fill the field 'name' in {part} with a short recipe title."
-            )
-        elif mode == "nutrition":
-            prompt = (
-                f"Respond in {lang_code}. "
-                f"Fill out calories and fatContent values in {part} as strings."
-            )
-        elif mode == "instructions":
-            prompt = (
-                f"Write your Response in {lang_code}. "
-                f"Fill instructions field in {part} with one long combined text. No JSON fragments."
+                f"Write your Response in the language {lang}. "
+                f"Please fill the JSON document {part}. "
+                f"Only step {step_number}. Output enclosed in ({backticks}json)."
             )
         else:
             prompt = (
-                f"Write your Response in {lang_code}. "
-                f"Please fill out fields in {part}. Respond with a JSON block enclosed in ({backticks}json)."
+                f"Write your Response in {lang}. Fill JSON {part}. "
+                f"Respond in JSON block ({backticks}json)."
             )
 
         data = send_json_prompt(browser, prompt)
-        if data:
-            logger.info(f"Processed recipe part ({mode}) successfully.")
-            return data
-        logger.warning(f"No response for mode {mode}")
-        return None
+        return data if data else None
 
     except Exception as e:
-        logger.error(f"Error processing recipe part ({mode}): {e}", exc_info=True)
+        logger.error(f"Error processing recipe part: {e}", exc_info=True)
         return None
