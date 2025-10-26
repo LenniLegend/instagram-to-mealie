@@ -385,7 +385,107 @@ def extract_json_from_response(response):
 
 def send_json_prompt(browser, prompt):
     """Wrapper: send prompt and parse JSON response"""
-    return extract_json_from_response(send_raw_prompt(browser, prompt))
+    # First try the normal flow (page source based extraction)
+    html = send_raw_prompt(browser, prompt)
+    data = extract_json_from_response(html)
+    if data:
+        return data
+
+    # Fallback: try to locate JSON-like text inside live DOM including
+    # shadow roots and iframes (some sites render responses only in composed DOM)
+    try:
+        logger.info("Attempting in-browser DOM traversal to find JSON candidates (shadow/iframe aware)")
+
+        js = r"""
+        (function(){
+            const results = [];
+
+            function collectFromRoot(root){
+                if(!root) return;
+                try{
+                    // preferred selectors that often contain code blocks / responses
+                    const selectors = ['code.language-json','pre','code','div','p','span'];
+                    let nodes = [];
+                    try{ nodes = root.querySelectorAll(selectors.join(',')); }catch(e){}
+                    nodes.forEach(n=>{
+                        try{
+                            const txt = (n.innerText||n.textContent||'').trim();
+                            if(!txt) return;
+                            // Heuristic: only return nodes that look JSON-like or contain fenced code
+                            if(txt.indexOf('```')>-1 || txt.indexOf('{')>-1 || txt.indexOf('recipeIngredient')>-1 || txt.indexOf('interactionStatistic')>-1){
+                                results.push({outer: n.outerHTML, text: txt});
+                            }
+                        }catch(e){}
+                    });
+                }catch(e){}
+
+                // walk shadow roots
+                try{
+                    const all = root.querySelectorAll('*');
+                    all.forEach(el=>{
+                        try{ if(el.shadowRoot) collectFromRoot(el.shadowRoot); }catch(e){}
+                    });
+                }catch(e){}
+
+                // walk iframes
+                try{
+                    const iframes = root.querySelectorAll('iframe');
+                    iframes.forEach(iframe=>{
+                        try{
+                            const doc = iframe.contentDocument || (iframe.contentWindow && iframe.contentWindow.document);
+                            if(doc) collectFromRoot(doc);
+                        }catch(e){}
+                    });
+                }catch(e){}
+            }
+
+            try{ collectFromRoot(document); }catch(e){}
+            return results;
+        })();
+        """
+
+        candidates = browser.execute_script(js)
+        if candidates and isinstance(candidates, list):
+            # try parsing each candidate text using the existing extract logic
+            for cand in candidates:
+                try:
+                    txt = cand.get('text') if isinstance(cand, dict) else str(cand)
+                    if not txt:
+                        continue
+                    # Try same extraction flows as extract_json_from_response
+                    # 1) triple-backtick code blocks
+                    backtick_blocks = re.findall(r"```(?:json\n)?([\s\S]*?)```", txt, flags=re.IGNORECASE)
+                    for blk in backtick_blocks:
+                        try:
+                            return json.loads(blk.strip())
+                        except Exception:
+                            continue
+
+                    # 2) full-text JSON blob
+                    # try to find large JSON-like substrings
+                    cand_jsons = re.findall(r"\{[\s\S]*\}", txt)
+                    cand_jsons = sorted(cand_jsons, key=lambda s: -len(s))
+                    for cj in cand_jsons:
+                        try:
+                            return json.loads(cj)
+                        except Exception:
+                            continue
+
+                    # 3) attempt direct parse if the whole text looks like JSON
+                    stripped = txt.strip()
+                    if (stripped.startswith('{') or stripped.startswith('[')):
+                        try:
+                            return json.loads(stripped)
+                        except Exception:
+                            pass
+                except Exception:
+                    continue
+
+        logger.info("In-browser traversal did not yield a parseable JSON candidate")
+    except Exception as e:
+        logger.error(f"In-browser DOM traversal failed: {e}", exc_info=True)
+
+    return None
 
 
 def get_number_of_steps(browser, caption=None):
